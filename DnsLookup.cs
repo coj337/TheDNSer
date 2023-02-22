@@ -1,5 +1,4 @@
-﻿using System.Buffers.Binary;
-using System.Collections.Concurrent;
+﻿using System.Buffers.Binary;//1.39m
 using System.Net;
 using System.Net.Sockets;
 
@@ -8,26 +7,52 @@ namespace DNS_Bruteforce;
 public class DnsLookup
 {
     private const int DNS_PORT = 53;
-    private const int PACKET_SIZE = 256;
+    private const int PACKET_SIZE = 512;
+    private const int RETRY_LIMIT = 50;
+    private const int TIMEOUT_MS = 500;
 
-    private IPAddress[] _dnsServers;
-    private int _lastUsedDnsServerIndex;
-    //private QueryInfo[] _queryInfos;
-    private ConcurrentDictionary<ushort, (string, IPAddress, DateTime)> _queryIdMap;
+    private readonly int _maxConcurrency;
 
     private static readonly IPEndPoint _blankEndpoint = new(IPAddress.Any, 0);
+    private readonly IPAddress[] _dnsServers;
+    private readonly bool[] _dnsServerBlacklist;
+    private int blacklistedServers = 0;
+    private readonly IPEndPoint _sendEndpoint;
+    private int _lastUsedDnsServerIndex;
+    private readonly QueryInfo[] _queryInfos;
+    private readonly Socket udpSocket;
+    private readonly object _sendLock = new(); // Make send thread safe
 
-    public DnsLookup(IPAddress[] dnsServers)
+    // Use a circular buffer instead of Queue<T> to avoid heap allocations
+    private KeyValuePair<ushort, Memory<byte>>[] _pendingSends;
+    private int _pendingSendsStart = 0;
+    private int _pendingSendsEnd = 0;
+
+    // Use a circular buffer instead of Queue<T> to avoid heap allocations
+    private Memory<byte>[] _pendingReceives;
+    private int _pendingReceivesStart = 0;
+    private int _pendingReceivesEnd = 0;
+
+    // Store our results
+    public readonly List<string> validSubdomains = new();
+
+    public DnsLookup(IPAddress[] dnsServers, int maxConcurrency)
     {
+        _maxConcurrency = maxConcurrency;
+        udpSocket = new(SocketType.Dgram, ProtocolType.Udp);
         _dnsServers = dnsServers;
+        _dnsServerBlacklist = new bool[dnsServers.Length];
+        _pendingReceives = new Memory<byte>[ushort.MaxValue + 1];
+        _pendingSends = new KeyValuePair<ushort, Memory<byte>>[ushort.MaxValue + 1];
         _lastUsedDnsServerIndex = 0;
-       // _queryInfos = new QueryInfo[ushort.MaxValue]; // Set the maximum number of concurrent queries to the max ushort (to match IDs)
-        _queryIdMap = new ConcurrentDictionary<ushort, (string, IPAddress, DateTime)>();
+        _queryInfos = new QueryInfo[ushort.MaxValue+1]; // Set the maximum number of concurrent queries to the max ushort (to match IDs) +1 because 0 index
+        _sendEndpoint = new IPEndPoint(dnsServers[0], DNS_PORT);
     }
 
-    // Cool opts - https://enclave.io/high-performance-udp-sockets-net6
-    public async Task SendAsync(string hostname, Socket udpSocket, CancellationToken cancelToken)
+    public void Send(string hostname, ushort? queryId = null)
     {
+        Interlocked.Increment(ref submitted);
+
         // Domain parts are split in the domain bytes so we need to add an extra spot for each part
         var domainParts = hostname.Count(c => c == '.')+1;
 
@@ -39,58 +64,173 @@ public class DnsLookup
         BuildQueryMessage(hostname, bufferMem.Span);
 
         // Store query info
-        ushort queryId;
-        do
+        lock (_sendLock) // We be thread safe :D
         {
-            Random.Shared.NextBytes(bufferMem.Span[..2]);
-            queryId = BinaryPrimitives.ReadUInt16BigEndian(bufferMem.Span[..2]);
+            // Write it if we already have one, retry. Otherwise generate that bad boy
+            if (queryId != null)
+            {
+                BinaryPrimitives.WriteUInt16BigEndian(buffer, queryId.Value);
+                _queryInfos[queryId.Value].TryCount++;
+            }
+            else
+            {
+                do
+                {
+                    Random.Shared.NextBytes(bufferMem.Span[..2]);
+                    queryId = BinaryPrimitives.ReadUInt16BigEndian(bufferMem.Span[..2]);
+                }
+                while (_queryInfos[queryId.Value].State != QueryState.NotStarted);
+                _queryInfos[queryId.Value].Hostname = hostname;
+                _queryInfos[queryId.Value].State = QueryState.Running;
+            }
+
+            // Make sure we have DNS servers to use, reset when > half are blacklisted. Otherwise reset blacklist
+            if (blacklistedServers > _dnsServers.Length / 2)
+            {
+                Array.Clear(_dnsServerBlacklist);
+                blacklistedServers = 0;
+            }
+
+            // Increment the index to the next valid DNS server
+            do
+            {
+                _lastUsedDnsServerIndex = (_lastUsedDnsServerIndex + 1) % _dnsServers.Length;
+            }
+            while (_dnsServerBlacklist[_lastUsedDnsServerIndex]);
+
+            // Assign the tracking variables
+            _queryInfos[queryId.Value].DnsServerIndex = _lastUsedDnsServerIndex;
+            _queryInfos[queryId.Value].StartTime = DateTime.UtcNow;
+
+            if(_queryInfos[queryId.Value].TryCount >= RETRY_LIMIT)
+            {
+                // Nope it
+                _queryInfos[queryId.Value].State = QueryState.Failed;
+                Interlocked.Increment(ref processedCount);
+            }
+            else
+            {
+                _pendingSends[_pendingSendsEnd] = KeyValuePair.Create(queryId.Value, bufferMem);
+                _pendingSendsEnd = (_pendingSendsEnd + 1) % _pendingSends.Length;
+            }
         }
-        while (!_queryIdMap.TryAdd(queryId, (hostname, _dnsServers[_lastUsedDnsServerIndex], DateTime.UtcNow)));
-
-        // Send it™️
-        await udpSocket.SendToAsync(bufferMem, SocketFlags.None, new IPEndPoint(_dnsServers[_lastUsedDnsServerIndex], DNS_PORT), cancelToken);
-
-        // Increment the index to the next DNS server
-        _lastUsedDnsServerIndex = (_lastUsedDnsServerIndex + 1) % _dnsServers.Length;
     }
 
-    public bool IsQueueEmpty()
+    public async Task StartSendProcessorAsync(CancellationToken cancelToken)
     {
-        return !_queryIdMap.Any();
+        while (!cancelToken.IsCancellationRequested)
+        {
+            KeyValuePair<ushort, Memory<byte>> currentItem;
+
+            // This is effectively `currentItem = _pendingSends.Dequeue()`
+            if (_pendingSendsStart != _pendingSendsEnd)
+            {
+                currentItem = _pendingSends[_pendingSendsStart];
+                _pendingSendsStart = (_pendingSendsStart + 1) % _pendingSends.Length;
+            }
+            else
+            {
+                currentItem = default;
+            }
+
+            // Make sure we have a real item and we're not breaking concurrency rules
+            if (currentItem.Value.Length > 0 && sentCount - processedCount < _maxConcurrency)
+            {
+                if(_queryInfos[currentItem.Key].State != QueryState.Running)
+                {
+                    continue; // Sneaky record raced and tried to go twice
+                }
+
+                // Send it™️
+                _sendEndpoint.Address = _dnsServers[_queryInfos[currentItem.Key].DnsServerIndex];
+                sentCount++;
+                await udpSocket.SendToAsync(currentItem.Value, SocketFlags.None, _sendEndpoint, cancelToken);
+            }
+            else
+            {
+                await Task.Delay(1000, cancelToken); // Wait if we're waiting for more packets
+            }
+        }
     }
 
-    public async Task ReceiveAsync(Socket udpSocket, CancellationToken cancelToken, Func<ushort, DnsResult, string, string, Task> callback)
+    public async Task ProcessReceiveQueueAsync(CancellationToken cancelToken)
     {
-        // Taking advantage of pre-pinned memory here using the .NET5 POH (pinned object heap).
-        byte[] buffer = GC.AllocateArray<byte>(PACKET_SIZE, pinned: true);
-        Memory<byte> bufferMem = buffer.AsMemory();
-        if(!udpSocket.IsBound)
+        if (!udpSocket.IsBound)
         {
             udpSocket.Bind(_blankEndpoint);
         }
 
         while (!cancelToken.IsCancellationRequested)
         {
-            var result = await udpSocket.ReceiveFromAsync(bufferMem, SocketFlags.None, _blankEndpoint, cancelToken);
-            await ParseResponseMessage(bufferMem[..result.ReceivedBytes], callback);
+            // Use pre-pinned memory using the .NET5 POH (pinned object heap).
+            byte[] buffer = GC.AllocateArray<byte>(PACKET_SIZE, pinned: true);
+            Memory<byte> bufferMem = buffer.AsMemory();
+
+            try
+            {
+                var result = await udpSocket.ReceiveAsync(bufferMem, SocketFlags.None, cancelToken);
+
+                var nextEnd = (_pendingReceivesEnd + 1) % _pendingReceives.Length;
+                if (nextEnd != _pendingReceivesStart)
+                {
+                    _pendingReceives[_pendingReceivesEnd] = bufferMem[..result];
+                    _pendingReceivesEnd = nextEnd;
+                    queued++;
+                }
+                else
+                {
+                    // Buffer full, drop the packet
+                }
+            }
+            catch (SocketException ex)
+            {
+                if (ex.SocketErrorCode == SocketError.ConnectionReset || ex.SocketErrorCode == SocketError.TimedOut)
+                {
+                    // Ignore these errors, they're expected in some cases
+                }
+                else
+                {
+                    throw;
+                }
+            }
         }
     }
 
-    public async Task ResendStaleQueries(CancellationToken cancelToken, Func<ushort, DnsResult, string, string, Task> callback)
+    public bool IsQueueEmpty()
+    {
+        return _queryInfos.All(q => q.State == QueryState.Complete || q.State == QueryState.NotStarted || q.State == QueryState.Failed);
+    }
+
+    public async Task StartReceivedProcessorAsync(CancellationToken cancelToken)
+    {
+        while (!cancelToken.IsCancellationRequested)
+        {
+            if (GetRetreiveQueueSize() > 0)
+            {
+                // Effectively `var currentItem = Queue<T>.Dequeue()`
+                var currentItem = _pendingReceives[_pendingReceivesStart];
+                _pendingReceivesStart = (_pendingReceivesStart + 1) % _pendingReceives.Length;
+
+                ParseResponseMessage(currentItem);
+            }
+            else
+            {
+                await Task.Delay(1000, cancelToken); // Wait if we're waiting for more packets
+            }
+        }
+    }
+
+    public async Task ResendStaleQueries(CancellationToken cancelToken)
     {
         while (!cancelToken.IsCancellationRequested)
         {
             await Task.Delay(1000, cancelToken); // Check every second
-            foreach (var query in _queryIdMap.Where(q => q.Value.Item3 < DateTime.UtcNow.AddSeconds(-5)))
+            var now = DateTime.UtcNow;
+            for (uint i = 0; i < _queryInfos.Length; i++)
             {
-                // Remove the old query from the dictionary
-                if (_queryIdMap.TryRemove(query.Key, out (string, IPAddress, DateTime) _))
+                if (_queryInfos[i].State == QueryState.Running && _queryInfos[i].StartTime < now.AddMilliseconds(TIMEOUT_MS*-1))
                 {
-                    await callback(query.Key, DnsResult.TIME_OUT, query.Value.Item2.ToString(), query.Value.Item1);
-                }
-                else
-                {
-
+                    ProcessStats((ushort)i, DnsResult.TIME_OUT, _queryInfos[i].DnsServerIndex, _queryInfos[i].Hostname ?? "");
                 }
             }
         }
@@ -112,7 +252,7 @@ public class DnsLookup
         BinaryPrimitives.WriteUInt16BigEndian(buffer[4..], 0x0001); // RA = 0, Z = 0, RCODE = 0, QDCOUNT = 1
         BinaryPrimitives.WriteUInt16BigEndian(buffer[6..], 0x0000); // ANCOUNT = 0
         BinaryPrimitives.WriteUInt16BigEndian(buffer[8..], 0x0000); // NSCOUNT = 0
-        BinaryPrimitives.WriteUInt16BigEndian(buffer[10..], 0x0000); //  ARCOUNT = 0
+        BinaryPrimitives.WriteUInt16BigEndian(buffer[10..], 0x0000); // ARCOUNT = 0
 
         // Build the DNS query
         BinaryPrimitives.WriteUInt16BigEndian(buffer[(12 + domainNameBytes)..], 0x0100); // QTYPE = A (host address)
@@ -132,9 +272,9 @@ public class DnsLookup
         return domainName.Length + domainNameParts.Length; // Let the caller know how many bytes were written
     }
 
-    private async Task ParseResponseMessage(ReadOnlyMemory<byte> responseMessage, Func<ushort, DnsResult, string, string, Task> callback)
+    private void ParseResponseMessage(ReadOnlyMemory<byte> responseMessage)
     {
-        DnsResult result; 
+        DnsResult result;
         if (responseMessage.Length < 12)
         {
             throw new FormatException("Invalid DNS response message");
@@ -192,22 +332,99 @@ public class DnsLookup
             }
         }
 
-        // Get domain and DNS server for this query ID and remove it from the dictionary
-        if (_queryIdMap.TryRemove(id, out var queryInfo))
-        {
-            await callback(id, result, queryInfo.Item2.ToString(), queryInfo.Item1);
-        }
-        else
-        {
+        // Process this boi
+        ProcessStats(id, result, _queryInfos[id].DnsServerIndex, _queryInfos[id].Hostname ?? "");
+    }
 
+    public int GetSendQueueSize()
+    {
+        return (_pendingSendsEnd - _pendingSendsStart + _pendingSends.Length) % _pendingSends.Length;
+    }
+
+    public int GetRetreiveQueueSize()
+    {
+        return (_pendingReceivesEnd - _pendingReceivesStart + _pendingReceives.Length) % _pendingReceives.Length;
+    }
+
+    public int ExistCount = 0;
+    public int ServFailCount = 0;
+    public int RefusedCount = 0;
+    public int ErrorCount = 0;
+    public int TimeoutCount = 0;
+    public int NotExistCount = 0;
+    public int NotImpCount = 0;
+    public int AllCount = 0;
+    public int processedCount = 0;
+    public int queued = 0;
+    public int sentCount = 0;
+    public int submitted = 0;
+    private void ProcessStats(ushort id, DnsResult result, int dnsServerIndex, string domain)
+    {
+        //Chance we hit this twice if we race as a stale query, we only care about once
+        if (_queryInfos[id].State == QueryState.Complete || _queryInfos[id].State == QueryState.Failed)
+        {
+            return;
         }
+        
+        switch (result)
+        {
+            case DnsResult.EXIST:
+                ExistCount++;
+                Interlocked.Increment(ref processedCount);
+                validSubdomains.Add(domain);
+                _queryInfos[id].State = QueryState.Complete;
+                break;
+            case DnsResult.SERVFAIL:
+                ServFailCount++;
+                Interlocked.Increment(ref processedCount);
+                _queryInfos[id].State = QueryState.Complete;
+                break;
+            case DnsResult.REFUSED:
+                RefusedCount++;
+                Interlocked.Increment(ref processedCount);
+                _queryInfos[id].State = QueryState.Complete;
+                break;
+            case DnsResult.ERROR:
+                ErrorCount++;
+                Send(domain, id);
+                break;
+            case DnsResult.TIME_OUT:
+                TimeoutCount++;
+                // Blacklist server for timing out ):<
+                // TODO: Add a timeout so it comes back (massdns does 60 seconds)
+                _dnsServerBlacklist[dnsServerIndex] = true;
+                blacklistedServers++;
+                Send(domain, id);
+                break;
+            case DnsResult.NOT_EXIST:
+                NotExistCount++;
+                Interlocked.Increment(ref processedCount);
+                _queryInfos[id].State = QueryState.Complete;
+                break;
+            case DnsResult.NOT_IMP:
+                NotImpCount++;
+                Send(domain, id);
+                break;
+            default: throw new Exception("Unexcepted DNS result!");
+        }
+
+        AllCount++;
     }
 }
 
 struct QueryInfo
 {
-    public string Hostname;
-    public IPAddress DnsServer;
+    public string? Hostname;
+    public int DnsServerIndex;
     public DateTime StartTime;
-    public DnsResult Result;
+    public int TryCount;
+    public QueryState State;
+}
+
+enum QueryState
+{
+    NotStarted,
+    Running,
+    Complete,
+    Failed
 }

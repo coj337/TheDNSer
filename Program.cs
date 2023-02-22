@@ -1,170 +1,102 @@
 ﻿using System.Diagnostics;
 using System.Net;
-using System.Net.Sockets;
 
 namespace DNS_Bruteforce;
 
 internal class Program
 {
     static List<string>? subdomains;
-    static List<string> validSubdomains = new();
-    static DnsLookup lookup;
+    static DnsLookup? lookup;
     static CancellationToken cancelToken;
-    static string rootDomain = "stratussecurity.com";
-    static int sentRequests = 0;
-    static int processedCount = 0;
-    static int maxConcurrency = 10000;
-    static Stopwatch timer = new();
-    static Socket udpSocket = new(SocketType.Dgram, ProtocolType.Udp);
+    static readonly string rootDomain = "stratussecurity.com";
+    //30k Subs, retry all -- 10k @ 86.75 sec | 20k @ 67.55456 sec
+    //30k Subs, retry normal -- 10k @ 60.55 sec | 20k @ 52.4209015 sec | 37.3495173 sec
+    //30k subs, retry normal, custom concurrency --  
+    static readonly int maxConcurrency = 10000; //TODO: Make it keep the concurrency up by duping remaining hosts
+    static readonly Stopwatch timer = new();
 
-    static async Task Main(string[] args)
+    static async Task Main()
     {
         // Get all the data
         subdomains = File.ReadAllLines("C:\\Users\\cojwa\\source\\repos\\TheENPT\\TheENPTer\\Configuration\\subdomains_small.txt").ToList();
         var resolvers = File.ReadAllLines("C:\\Users\\cojwa\\source\\repos\\TheENPT\\TheENPTer\\Configuration\\dns_resolvers.txt").ToList();
         var range = Enumerable.Range(0, subdomains.Count).ToList();
 
-        var resolverEndpoints = new List<IPAddress>();
-        foreach (var resolver in resolvers)
+        var resolverEndpoints = new IPAddress[resolvers.Count];
+        for (var i = 0; i < resolvers.Count; i++)
         {
-            resolverEndpoints.Add(IPAddress.Parse(resolver));
+            resolverEndpoints[i] = IPAddress.Parse(resolvers[i]);
         }
-        lookup = new DnsLookup(resolverEndpoints.ToArray());
+        lookup = new DnsLookup(resolverEndpoints, maxConcurrency);
 
         // Get a cancel source that cancels when the user presses CTRL+C.
         var userExitSource = GetUserConsoleCancellationSource();
         cancelToken = userExitSource.Token;
 
-        // Discard our socket when the user cancels.
-        using var cancelReg = cancelToken.Register(udpSocket.Dispose);
+        // Start background tasks to send, receive and process the data
+        var tasks = new List<Task>
+        {
+            lookup.StartReceivedProcessorAsync(cancelToken),
+            lookup.StartSendProcessorAsync(cancelToken),
+            lookup.ResendStaleQueries(cancelToken),
+            PrintStats()
+        };
 
-        // Start a background task to receive the data
-        var receiveTask = lookup.ReceiveAsync(udpSocket, cancelToken, ReceiveCallback);
-
-        var stalePacketTask = lookup.ResendStaleQueries(cancelToken, ReceiveCallback);
+        var receiveThread = new Thread(() => lookup.ProcessReceiveQueueAsync(cancelToken))
+        {
+            IsBackground = true
+        };
+        receiveThread.Start();
 
         // Resolve the subdomains :D
         timer.Start();
         for (var i = 0; i < range.Count; i++)
         {
-            if ((sentRequests - AllCount) < maxConcurrency)
-            {
-                await lookup.SendAsync($"{subdomains[i]}.{rootDomain}", udpSocket, cancelToken);
-                sentRequests++;
-            }
-            else
-            {
-                await Task.Delay(1000);
-                i--;
-            }
+            lookup.Send($"{subdomains[i]}.{rootDomain}");
         }
-
+        
         try
         {
             while (!cancelToken.IsCancellationRequested)
             {
                 await Task.Delay(1000);
-                if (processedCount == subdomains.Count)
+                if (lookup.processedCount >= subdomains.Count && lookup.IsQueueEmpty())
                 {
-                    if (!lookup.IsQueueEmpty())
-                    {
-
-                    }
                     userExitSource.Cancel();
                 }
             }
 
-            await stalePacketTask;
-            await receiveTask;
+            await Task.WhenAll(tasks);
         }
-        catch (TaskCanceledException)
+        catch (OperationCanceledException)
         {
             // This is planned, we're done :D
+            timer.Stop();
         }
 
         Console.WriteLine();
-        foreach (var subdomain in validSubdomains)
+        foreach (var subdomain in lookup.validSubdomains)
         {
             Console.WriteLine($"Found: {subdomain}");
         }
-        Console.WriteLine($"Took {timer.Elapsed.Seconds} seconds");
+        Console.WriteLine($"Took {timer.Elapsed.TotalSeconds} seconds");
     }
 
-    private static int ExistCount = 0;
-    private static int ServFailCount = 0;
-    private static int RefusedCount = 0;
-    private static int ErrorCount = 0;
-    private static int TimeoutCount = 0;
-    private static int NotExistCount = 0;
-    private static int NotImpCount = 0;
-    private static int AllCount = 0;
-    private static async Task ReceiveCallback(ushort id, DnsResult result, string dnsServer, string domain)
+    private static async Task PrintStats()
     {
-        if(domain == "dradis.stratussecurity.com" || domain == "www.stratussecurity.com" || domain == "nessus.stratussecurity.com")
+        while (!cancelToken.IsCancellationRequested)
         {
-            if(result != DnsResult.EXIST)
+            await Task.Delay(1000);
+            if (lookup != null)
             {
-
+                var printOut = $"\rS_Pending {lookup.GetSendQueueSize()} | R_Pending {lookup.GetRetreiveQueueSize()} | Sent {lookup.sent} | Received {lookup.AllCount} | Error: {lookup.ErrorCount} | Refused {lookup.RefusedCount} | ServFail {lookup.ServFailCount} | Timeout {lookup.TimeoutCount} | Not Imp {lookup.NotImpCount} | Not Exist {lookup.NotExistCount} | Exist {lookup.ExistCount} | Total {lookup.processedCount}/{subdomains?.Count ?? 0}";
+                if (timer.Elapsed.Seconds > 0 && lookup.AllCount > 0 && lookup.sent > 0)
+                {
+                    printOut += $" | {lookup.AllCount / timer.Elapsed.Seconds} received/s | {lookup.sent / timer.Elapsed.Seconds} sent/s";
+                }
+                Console.Write(printOut + "  ");
             }
         }
-
-        if (result == DnsResult.EXIST)
-        {
-            //validResults.Add($"{subdomains[i]}.{domain}");
-            ExistCount++;
-            Interlocked.Increment(ref processedCount);
-            validSubdomains.Add(domain);
-            //Console.WriteLine();
-            //Console.WriteLine($":D | {id} | {domain}");
-        }
-        else if (result == DnsResult.SERVFAIL)
-        {
-            ServFailCount++;
-            Interlocked.Increment(ref processedCount);
-            // We don't retry these
-        }
-        else if (result == DnsResult.REFUSED)
-        {
-            RefusedCount++;
-            Interlocked.Increment(ref processedCount);
-            // We don't retry these
-        }
-        else if (result == DnsResult.ERROR)
-        {
-            ErrorCount++;
-            await lookup.SendAsync(domain, udpSocket, cancelToken);
-            Interlocked.Increment(ref sentRequests);
-        }
-        else if (result == DnsResult.TIME_OUT)
-        {
-            TimeoutCount++;
-            await lookup.SendAsync(domain, udpSocket, cancelToken);
-            Interlocked.Increment(ref sentRequests);
-        }
-        else if (result == DnsResult.NOT_EXIST)
-        {
-            NotExistCount++;
-            Interlocked.Increment(ref processedCount);
-            // This is fine
-        }
-        else if (result == DnsResult.NOT_IMP)
-        {
-            NotImpCount++;
-            await lookup.SendAsync(domain, udpSocket, cancelToken);
-            Interlocked.Increment(ref sentRequests);
-        }
-        else
-        {
-            throw new Exception("Unexcepted DNS result!");
-        }
-
-        AllCount++;
-        var printOut = $"\rSent {sentRequests} | Received {AllCount} | Error: {ErrorCount} | Refused {RefusedCount} | ServFail {ServFailCount} | Timeout {TimeoutCount} | Not Implemented {NotImpCount} | Not Exist {NotExistCount} | Exist {ExistCount} | Total {processedCount}/{subdomains.Count}";
-        if (timer.Elapsed.Seconds > 0 && AllCount > 0 && sentRequests > 0)
-        {
-            printOut += $" | {AllCount / timer.Elapsed.Seconds} received/s | {sentRequests / timer.Elapsed.Seconds} sent/s";
-        }
-        Console.Write(printOut + "  ");
     }
 
     private static CancellationTokenSource GetUserConsoleCancellationSource()
