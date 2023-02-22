@@ -89,10 +89,10 @@ internal class Program
             await Task.Delay(1000);
             if (lookup != null)
             {
-                var printOut = $"\rS_Pending {lookup.GetSendQueueSize()} | R_Pending {lookup.GetRetreiveQueueSize()} | Sent {lookup.sent} | Received {lookup.AllCount} | Error: {lookup.ErrorCount} | Refused {lookup.RefusedCount} | ServFail {lookup.ServFailCount} | Timeout {lookup.TimeoutCount} | Not Imp {lookup.NotImpCount} | Not Exist {lookup.NotExistCount} | Exist {lookup.ExistCount} | Total {lookup.processedCount}/{subdomains?.Count ?? 0}";
-                if (timer.Elapsed.Seconds > 0 && lookup.AllCount > 0 && lookup.sent > 0)
+                var printOut = $"\rS_Pending {lookup.GetSendQueueSize()} | R_Pending {lookup.GetRetreiveQueueSize()} | Sent {lookup.sentCount} | Received {lookup.AllCount} | Error: {lookup.ErrorCount} | Refused {lookup.RefusedCount} | ServFail {lookup.ServFailCount} | Timeout {lookup.TimeoutCount} | Not Imp {lookup.NotImpCount} | Not Exist {lookup.NotExistCount} | Exist {lookup.ExistCount} | Total {lookup.processedCount}/{subdomains?.Count ?? 0}";
+                if (timer.Elapsed.Seconds > 0 && lookup.AllCount > 0 && lookup.sentCount > 0)
                 {
-                    printOut += $" | {lookup.AllCount / timer.Elapsed.Seconds} received/s | {lookup.sent / timer.Elapsed.Seconds} sent/s";
+                    printOut += $" | {lookup.AllCount / timer.Elapsed.Seconds} received/s | {lookup.sentCount / timer.Elapsed.Seconds} sent/s";
                 }
                 Console.Write(printOut + "  ");
             }
