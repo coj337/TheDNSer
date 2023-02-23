@@ -9,10 +9,10 @@ internal class Program
     static DnsLookup? lookup;
     static CancellationToken cancelToken;
     static readonly string rootDomain = "stratussecurity.com";
-    //30k Subs, retry all -- 10k @ 86.75 sec | 20k @ 67.55456 sec
-    //30k Subs, retry normal -- 10k @ 60.55 sec | 20k @ 52.4209015 sec | 37.3495173 sec
+    //30k Subs, retry all -- 10k @ 86.75 sec | 20k @ 67.55456 sec -- old code
+    //30k Subs, retry normal -- 10k @ 58.6178962 sec | 20k @ 57.5842511 sec | 30k @ 47.4359877 sec
     //30k subs, retry normal, custom concurrency --  
-    static readonly int maxConcurrency = 10000; //TODO: Make it keep the concurrency up by duping remaining hosts
+    static readonly int maxConcurrency = 20000; //TODO: Make it keep the concurrency up by duping remaining hosts
     static readonly Stopwatch timer = new();
 
     static async Task Main()
@@ -75,6 +75,7 @@ internal class Program
         }
 
         Console.WriteLine();
+        Console.WriteLine($"Failed: {lookup.GetFailedCount()}");
         foreach (var subdomain in lookup.validSubdomains)
         {
             Console.WriteLine($"Found: {subdomain}");
@@ -89,10 +90,10 @@ internal class Program
             await Task.Delay(1000);
             if (lookup != null)
             {
-                var printOut = $"\rS_Pending {lookup.GetSendQueueSize()} | R_Pending {lookup.GetRetreiveQueueSize()} | Sent {lookup.sentCount} | Received {lookup.AllCount} | Error: {lookup.ErrorCount} | Refused {lookup.RefusedCount} | ServFail {lookup.ServFailCount} | Timeout {lookup.TimeoutCount} | Not Imp {lookup.NotImpCount} | Not Exist {lookup.NotExistCount} | Exist {lookup.ExistCount} | Total {lookup.processedCount}/{subdomains?.Count ?? 0}";
+                var printOut = $"\rRunning {lookup._runningCount} | S_Pending {lookup.GetSendQueueSize()} | R_Pending {lookup.GetRetreiveQueueSize()} | S {lookup.sentCount} | R {lookup.AllCount} | Err: {lookup.ErrorCount} | Refuse {lookup.RefusedCount} | ServFail {lookup.ServFailCount} | Timeout {lookup.TimeoutCount} | Not Imp {lookup.NotImpCount} | Not Exist {lookup.NotExistCount} | Exist {lookup.ExistCount} | Total {lookup.processedCount}/{subdomains?.Count ?? 0}";
                 if (timer.Elapsed.Seconds > 0 && lookup.AllCount > 0 && lookup.sentCount > 0)
                 {
-                    printOut += $" | {lookup.AllCount / timer.Elapsed.Seconds} received/s | {lookup.sentCount / timer.Elapsed.Seconds} sent/s";
+                    printOut += $" | {lookup.AllCount / timer.Elapsed.Seconds} r/s | {lookup.sentCount / timer.Elapsed.Seconds} s/s";
                 }
                 Console.Write(printOut + "  ");
             }
