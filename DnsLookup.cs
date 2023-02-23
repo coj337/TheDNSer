@@ -1,6 +1,5 @@
 ﻿using System.Buffers.Binary;
 using System.Collections.Concurrent;
-using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 
@@ -10,15 +9,15 @@ public class DnsLookup
 {
     private const int DNS_PORT = 53;
     private const int PACKET_SIZE = 512;
-    private const int RETRY_LIMIT = 50;
-    private const int TIMEOUT_MS = 500;
+    private const int RETRY_LIMIT = 25;
+    private const int TIMEOUT_MS = 1000;
 
     private readonly int _maxConcurrency;
 
     private static readonly IPEndPoint _blankEndpoint = new(IPAddress.Any, 0);
     private readonly IPAddress[] _dnsServers;
-    private readonly bool[] _dnsServerBlacklist;
-    private int blacklistedServers = 0;
+    //private readonly bool[] _dnsServerBlacklist;
+    //private int blacklistedServers = 0;
     private readonly IPEndPoint _sendEndpoint;
     private int _lastUsedDnsServerIndex;
     private readonly QueryInfo[] _queryInfos;
@@ -28,7 +27,8 @@ public class DnsLookup
     public int _runningCount = 0; // Tracks how many are currently sent and not finished
 
     // An array that matches the indexes in _queryInfos to store unsent requests and avoid heap allocations
-    private Memory<byte>[] _pendingSends;
+    private readonly Memory<byte>[] _pendingSends;
+    private int _pendingSendSize = 0; // Track the size manually to avoid iterations in hot paths
 
     // Use a circular buffer instead of Queue<T> to avoid heap allocations
     private Memory<byte>[] _pendingReceives;
@@ -43,7 +43,7 @@ public class DnsLookup
         _maxConcurrency = maxConcurrency;
         udpSocket = new(SocketType.Dgram, ProtocolType.Udp);
         _dnsServers = dnsServers;
-        _dnsServerBlacklist = new bool[dnsServers.Length];
+        //_dnsServerBlacklist = new bool[dnsServers.Length];
         _pendingReceives = new Memory<byte>[ushort.MaxValue+1];
         _pendingSends = new Memory<byte>[ushort.MaxValue+1];
         _queryLocks = new object[ushort.MaxValue+1];
@@ -90,9 +90,8 @@ public class DnsLookup
                 _queryInfos[queryId.Value].Hostname = hostname;
             }
             _queryInfos[queryId.Value].State = QueryState.Queued;
-
             // Make sure we have DNS servers to use, reset when > half are blacklisted. Otherwise reset blacklist
-            if (blacklistedServers > _dnsServers.Length / 2)
+            /*if (blacklistedServers > _dnsServers.Length / 2)
             {
                 Array.Clear(_dnsServerBlacklist);
                 blacklistedServers = 0;
@@ -103,21 +102,21 @@ public class DnsLookup
             {
                 _lastUsedDnsServerIndex = (_lastUsedDnsServerIndex + 1) % _dnsServers.Length;
             }
-            while (_dnsServerBlacklist[_lastUsedDnsServerIndex]);
+            while (_dnsServerBlacklist[_lastUsedDnsServerIndex]);*/
 
             // Assign the tracking variables
-            _queryInfos[queryId.Value].DnsServerIndex = _lastUsedDnsServerIndex;
+            //_queryInfos[queryId.Value].DnsServerIndex = _lastUsedDnsServerIndex;
 
-            if(_queryInfos[queryId.Value].TryCount >= RETRY_LIMIT)
+            if (_queryInfos[queryId.Value].TryCount >= RETRY_LIMIT)
             {
                 // Nope it
                 _queryInfos[queryId.Value].State = QueryState.Failed;
                 Interlocked.Increment(ref processedCount);
-                Interlocked.Decrement(ref _runningCount);
             }
             else
             {
                 _pendingSends[queryId.Value] = bufferMem;
+                Interlocked.Increment(ref _pendingSendSize);
             }
         }
     }
@@ -133,44 +132,44 @@ public class DnsLookup
                 // Make sure we have a real item and we're not breaking concurrency rules
                 if (_pendingSends[i].Length > 0 && _runningCount < _maxConcurrency)
                 {
-                    if (_queryInfos[i].State != QueryState.Queued)
+                    lock (_queryLocks[i])
                     {
-                        _pendingSends[i] = default; // Reset the memory back
-                        continue; // Sneaky record raced and tried to go twice
-                    }
-
-                    // When we get down to the last (concurrency / 10) requests, do 10 extra at once so we finish quicker :D
-                    var remainingConcurrency = _maxConcurrency - _runningCount;
-                    if (remainingConcurrency > _maxConcurrency / 2 && GetSendQueueSize() + _runningCount < _maxConcurrency / 2)
-                    {
-                        for(var j = 0; j < 10; j++)
+                        if (_queryInfos[i].State != QueryState.Queued)
                         {
-                            _sendEndpoint.Address = _dnsServers[(_queryInfos[i].DnsServerIndex + j) % _dnsServers.Length];
-                            await udpSocket.SendToAsync(_pendingSends[i], SocketFlags.None, _sendEndpoint, cancelToken);
-                            Interlocked.Increment(ref _runningCount);
+                            _pendingSends[i] = default; // Reset the memory back
+                            Interlocked.Decrement(ref _pendingSendSize);
+                            continue; // Sneaky record raced and tried to go twice
                         }
+
+                        // Colin is such a huge cutie!! i love him so so so so (x infinity+1) much! he's super duper smart!! <3 <3 <3 <-- mission critical. Makes the code go zoom. 
+                        // Send it™️ - We send <iterations> times to ensure we find a good server ASAP
+                        sbyte iterations = 5;
+                        for (var j = 0; j < iterations; j++)
+                        {
+                            _lastUsedDnsServerIndex = (_lastUsedDnsServerIndex + 1) % _dnsServers.Length;
+                            _sendEndpoint.Address = _dnsServers[_lastUsedDnsServerIndex];
+                            udpSocket.SendTo(_pendingSends[i].Span, SocketFlags.None, _sendEndpoint);
+                        }
+                        Interlocked.Add(ref _runningCount, iterations);
+
+                        // Mark it as running
+                        _queryInfos[i].StartTime = DateTime.UtcNow;
+                        _queryInfos[i].State = QueryState.Running;
+                        _queryInfos[i].IterationCount = iterations;
+                        Interlocked.Add(ref sentCount, iterations);
+
+                        // Reset the memory back and track stats
+                        _pendingSends[i] = default;
+                        Interlocked.Decrement(ref _pendingSendSize);
                     }
-
-                    // Send it™️
-                    _sendEndpoint.Address = _dnsServers[_queryInfos[i].DnsServerIndex];
-                    await udpSocket.SendToAsync(_pendingSends[i], SocketFlags.None, _sendEndpoint, cancelToken);
-                    _pendingSends[i] = default; // Reset the memory back
-
-                    // Track how many *new* things are running
-                    if (_queryInfos[i].TryCount == 0)
-                    {
-                        Interlocked.Increment(ref _runningCount);
-                    }
-
-                    // Now we can mark it running
-                    _queryInfos[i].StartTime = DateTime.UtcNow;
-                    _queryInfos[i].State = QueryState.Running;
-                    sentCount++;
                 }
-
             }
-            // Wait between loops so we don't destroy the CPU when _pendingSends is empty or at max concurrency
-            await Task.Delay(100, cancelToken);
+
+            // If we don't have much concurrency left or there's nothing in queue, wait so the CPU can be chill
+            if (_pendingSendSize == 0 || _runningCount >= _maxConcurrency - (_maxConcurrency / 100))
+            {
+                await Task.Delay(1000, cancelToken);
+            }
         }
     }
 
@@ -237,9 +236,12 @@ public class DnsLookup
             var now = DateTime.UtcNow;
             for (uint i = 0; i < _queryInfos.Length; i++)
             {
-                if (_queryInfos[i].State == QueryState.Running && _queryInfos[i].StartTime < now.AddMilliseconds(TIMEOUT_MS*-1))
+                lock(_queryLocks[i])
                 {
-                    ProcessStats((ushort)i, DnsResult.TIME_OUT, _queryInfos[i].DnsServerIndex, _queryInfos[i].Hostname ?? "");
+                    if (_queryInfos[i].State == QueryState.Running && _queryInfos[i].StartTime < now.AddMilliseconds(TIMEOUT_MS * -1))
+                    {
+                        ProcessStats((ushort)i, DnsResult.TIME_OUT/*, _queryInfos[i].DnsServerIndex*/, _queryInfos[i].Hostname ?? "");
+                    }
                 }
             }
         }
@@ -248,7 +250,6 @@ public class DnsLookup
     private void BuildQueryMessage(string domainName, Span<byte> buffer)
     {
         // Note: We skip the first two bytes (query ID) here and do it in the calling function
-
         var domainNameBytes = BuildDomainNameBytes(domainName, buffer[12..]);
 
         if (buffer.Length != 12 + domainNameBytes + 4)
@@ -344,12 +345,12 @@ public class DnsLookup
         }
 
         // Process this boi
-        ProcessStats(id, result, _queryInfos[id].DnsServerIndex, _queryInfos[id].Hostname ?? "");
+        ProcessStats(id, result, /*_queryInfos[id].DnsServerIndex,*/ _queryInfos[id].Hostname ?? "");
     }
 
     public int GetSendQueueSize()
     {
-        return _pendingSends.Count(s => s.Length > 0);
+        return _pendingSendSize;
     }
 
     public int GetRetreiveQueueSize()
@@ -374,12 +375,12 @@ public class DnsLookup
     public int queued = 0;
     public int sentCount = 0;
     public int submitted = 0;
-    private void ProcessStats(ushort id, DnsResult result, int dnsServerIndex, string domain)
+    private void ProcessStats(ushort id, DnsResult result/*, int dnsServerIndex*/, string domain)
     {
         lock (_queryLocks[id])
         {
             //Chance we hit this twice if we race as a stale query, we only care about once
-            if (_queryInfos[id].State == QueryState.Complete || _queryInfos[id].State == QueryState.Failed)
+            if (_queryInfos[id].State != QueryState.Running)
             {
                 return;
             }
@@ -389,20 +390,17 @@ public class DnsLookup
                 case DnsResult.EXIST:
                     Interlocked.Increment(ref ExistCount);
                     Interlocked.Increment(ref processedCount);
-                    Interlocked.Decrement(ref _runningCount);
                     validSubdomains.Add(domain);
                     _queryInfos[id].State = QueryState.Complete;
                     break;
                 case DnsResult.SERVFAIL:
                     Interlocked.Increment(ref ServFailCount);
                     Interlocked.Increment(ref processedCount);
-                    Interlocked.Decrement(ref _runningCount);
                     _queryInfos[id].State = QueryState.Complete;
                     break;
                 case DnsResult.REFUSED:
                     Interlocked.Increment(ref RefusedCount);
                     Interlocked.Increment(ref processedCount);
-                    Interlocked.Decrement(ref _runningCount);
                     _queryInfos[id].State = QueryState.Complete;
                     break;
                 case DnsResult.ERROR:
@@ -413,14 +411,13 @@ public class DnsLookup
                     TimeoutCount++;
                     // Blacklist server for timing out ):<
                     // TODO: Add a timeout so it comes back (massdns does 60 seconds)
-                    _dnsServerBlacklist[dnsServerIndex] = true;
-                    blacklistedServers++;
+                    //_dnsServerBlacklist[dnsServerIndex] = true;
+                    //blacklistedServers++;
                     Send(domain, id);
                     break;
                 case DnsResult.NOT_EXIST:
                     NotExistCount++;
                     Interlocked.Increment(ref processedCount);
-                    Interlocked.Decrement(ref _runningCount);
                     _queryInfos[id].State = QueryState.Complete;
                     break;
                 case DnsResult.NOT_IMP:
@@ -429,22 +426,23 @@ public class DnsLookup
                     break;
                 default: throw new Exception("Unexcepted DNS result!");
             }
-
-            Interlocked.Increment(ref AllCount);
         }
+        Interlocked.Add(ref _runningCount, _queryInfos[id].IterationCount * -1);
+        Interlocked.Increment(ref AllCount);
     }
 }
 
-struct QueryInfo
+public struct QueryInfo
 {
     public string? Hostname;
-    public int DnsServerIndex;
+    //public int DnsServerIndex;
     public DateTime StartTime;
     public int TryCount;
     public QueryState State;
+    public sbyte IterationCount;
 }
 
-enum QueryState
+public enum QueryState
 {
     NotStarted,
     Running,
