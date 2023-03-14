@@ -1,4 +1,4 @@
-﻿# TheDNS
+﻿# TheDNSer
 TheDNS is a DNS brute forcing tool and is intended as a simple replacement for MassDNS.
 
 ## Features
@@ -21,5 +21,5 @@ Note: PureDNS was run with --skip-validation --skip-wildcard-filter and the same
 ## Getting Started
 Simply pass the root domain, a file with a list of subdomains to resolve, and a list of resolvers
 ```
-	TheDNSer.exe stratussecurity.com subdomain.txt dns_resolvers.txt
+TheDNSer.exe stratussecurity.com subdomain.txt dns_resolvers.txt
 ```
