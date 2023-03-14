@@ -1,5 +1,5 @@
 ﻿# TheDNSer
-TheDNSer is a DNS brute forcing tool and is intended as a simple replacement for MassDNS.
+TheDNSer is a DNS brute forcing tool and is intended as a simple replacement for MassDNS and tools based on MassDNS like PureDNS.
 
 ## Features
 - *Fast* DNS brute-forcing without any external dependencies.
@@ -23,3 +23,7 @@ Simply pass the root domain, a file with a list of subdomains to resolve, and a 
 ```
 TheDNSer.exe stratussecurity.com subdomain.txt dns_resolvers.txt
 ```
+
+## Nuget Library
+There is a nuget library published as "DNS_Bruteforcer" for using this library natively in another application.
+See Program.cs for example library usage.

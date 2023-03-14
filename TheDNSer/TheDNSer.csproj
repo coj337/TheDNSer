@@ -27,6 +27,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\DNS Bruteforcer\DNS_Bruteforcer.csproj" />
+    <ProjectReference Include="..\DNS_Bruteforcer\DNS_Bruteforcer.csproj" />
   </ItemGroup>
 
   <ItemGroup>
