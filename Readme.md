@@ -10,7 +10,7 @@ DNS Brute-Forcing a list of 30,000 subdomains, the tool outperforms MassDNS base
 ```
 PureDNS Benchmark:
 	30,000 records | 25 seconds
-    650,000 records | 1 minute, 16 seconds
+	650,000 records | 1 minute, 16 seconds
 TheDNSer Benchmark:
 	30,000 records | 6 seconds
 	650,000 records | 1 minute, 17 seconds
@@ -25,5 +25,5 @@ TheDNSer.exe stratussecurity.com subdomain.txt dns_resolvers.txt
 ```
 
 ## Nuget Library
-There is a nuget library published as "DNS_Bruteforcer" for using this library natively in another application.
+There is a nuget library published as "DNS Bruteforcer" for using the library natively in another application.
 See Program.cs for example library usage.

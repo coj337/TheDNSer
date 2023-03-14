@@ -7,7 +7,12 @@
     <Nullable>enable</Nullable>
     <GeneratePackageOnBuild>True</GeneratePackageOnBuild>
     <Title>DNS Bruteforcer</Title>
-    <Version>0.1.0</Version>
+    <Version>0.1.1</Version>
+    <Authors>coj337</Authors>
+    <Company>Stratus Security</Company>
+    <PackageProjectUrl>https://github.com/coj337/TheDNSer</PackageProjectUrl>
+    <Description>A library for extremely high performance DNS resolution.</Description>
+    <RepositoryUrl>https://github.com/coj337/TheDNSer</RepositoryUrl>
   </PropertyGroup>
 
 </Project>
