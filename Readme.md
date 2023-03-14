@@ -1,9 +1,9 @@
 ﻿# TheDNSer
-TheDNS is a DNS brute forcing tool and is intended as a simple replacement for MassDNS.
+TheDNSer is a DNS brute forcing tool and is intended as a simple replacement for MassDNS.
 
 ## Features
-*Fast* DNS brute-forcing without any external dependencies.
-Coming Soon: Validation and wildcard filtering
+- *Fast* DNS brute-forcing without any external dependencies.
+- Coming Soon: Validation and wildcard filtering
 
 ## Performance
 DNS Brute-Forcing a list of 30,000 subdomains, the tool outperforms MassDNS based tools.
@@ -11,7 +11,7 @@ DNS Brute-Forcing a list of 30,000 subdomains, the tool outperforms MassDNS base
 PureDNS Benchmark:
 	30,000 records | 25 seconds
     650,000 records | 1 minute, 16 seconds
-TheDNS Benchmark:
+TheDNSer Benchmark:
 	30,000 records | 6 seconds
 	650,000 records | 1 minute, 17 seconds
 ```
