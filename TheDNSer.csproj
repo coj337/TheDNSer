@@ -6,7 +6,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <Platforms>AnyCPU;x64</Platforms>
-    <GeneratePackageOnBuild>True</GeneratePackageOnBuild>
+    <GeneratePackageOnBuild>False</GeneratePackageOnBuild>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|AnyCPU'">
@@ -24,6 +24,10 @@
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <DebugType>portable</DebugType>
   </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\DNS Bruteforcer\DNS_Bruteforcer.csproj" />
+  </ItemGroup>
 
   <ItemGroup>
     <None Update="dns_resolvers.txt">

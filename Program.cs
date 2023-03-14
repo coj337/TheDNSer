@@ -1,6 +1,7 @@
-﻿using System.Diagnostics;
+﻿using DNS_Bruteforcer;
+using System.Diagnostics;
 
-namespace DNS_Bruteforce;
+namespace TheDNSer;
 
 internal class Program
 {
@@ -9,27 +10,33 @@ internal class Program
 
     static async Task Main(string[] args)
     {
-        if (args.Length < 2)
+        if (args.Length < 3)
         {
-            Console.WriteLine("Usage: TheDNS.exe <subdomains_file> <resolvers_file>");
+            Console.WriteLine("Usage: TheDNS.exe rootDomain.com <subdomains_file> <resolvers_file>");
             return;
         }
 
-        if (!File.Exists(args[0]))
+        if (string.IsNullOrEmpty(args[0]) || args[0].Contains(':'))
+        {
+            Console.WriteLine("Root domain is invalid.");
+            return;
+        }
+
+        if (!File.Exists(args[1]))
         {
             Console.WriteLine("Subdomain file does not exist.");
             return;
         }
 
-        if (!File.Exists(args[1]))
+        if (!File.Exists(args[2]))
         {
             Console.WriteLine("Resolvers file does not exist.");
             return;
         }
 
         // Get all the data
-        var subdomains = File.ReadAllLines(args[0]).Select(s => $"{s}.{rootDomain}").ToArray();
-        var resolvers = File.ReadAllLines(args[1]).ToArray();
+        var subdomains = File.ReadAllLines(args[1]).Select(s => $"{s}.{args[0]}").ToArray();
+        var resolvers = File.ReadAllLines(args[2]).ToArray();
 
         // Construct and run
         timer.Start();

@@ -1,8 +1,8 @@
 {
   "profiles": {
-    "DNS_Bruteforce": {
+    "TheDNSer": {
       "commandName": "Project",
-      "commandLineArgs": "subdomains.txt dns_resolvers.txt"
+      "commandLineArgs": "stratussecurity.com subdomains.txt dns_resolvers.txt"
     }
   }
 }
