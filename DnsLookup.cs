@@ -38,12 +38,21 @@ public class DnsLookup
     // Store our results
     public readonly ConcurrentBag<string> validSubdomains = new();
 
-    public DnsLookup(IPAddress[] dnsServers, string[] subdomains, int maxConcurrency)
+    public DnsLookup(string[] dnsServers, string[] subdomains, int maxConcurrency = 65535)
     {
         if(maxConcurrency > 65535)
         {
             throw new Exception("Exception: Max concurrency can't be above 65535.");
         }
+
+        // Translate DNS servers
+        var resolverEndpoints = new IPAddress[dnsServers.Length];
+        for (var i = 0; i < dnsServers.Length; i++)
+        {
+            resolverEndpoints[i] = IPAddress.Parse(dnsServers[i]);
+        }
+
+        // Set up all the things
         _subdomains = subdomains;
         _completedDomains = new HashSet<string>(subdomains.Length);
         _pendingReceives = new Memory<byte>[maxConcurrency];
@@ -55,12 +64,12 @@ public class DnsLookup
             _queryLocks[i] = new object();
         }
 
-        _dnsServers = dnsServers;
-        _sendEndpoint = new IPEndPoint(dnsServers[0], DNS_PORT);
+        _dnsServers = resolverEndpoints;
+        _sendEndpoint = new IPEndPoint(resolverEndpoints[0], DNS_PORT);
         udpSocket = new(SocketType.Dgram, ProtocolType.Udp);
     }
 
-    public async Task<string[]> BruteForce(CancellationToken cancelToken = default, bool printStats = false)
+    public async Task<string[]> BruteForce(bool printStats = false, CancellationToken cancelToken = default)
     {
         // Start background tasks to send, receive and process the data
         var tasks = new List<Task>
@@ -376,7 +385,7 @@ public class DnsLookup
                 result = DnsResult.EXIST;
 
                 // Extract the domain name from the question section
-                var questionSection = responseMessage.Slice(12);
+                var questionSection = responseMessage[12..];
                 int offset = 0;
                 while (questionSection.Span[offset] != 0)
                 {

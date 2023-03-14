@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "DNS_Bruteforce": {
+      "commandName": "Project",
+      "commandLineArgs": "subdomains.txt dns_resolvers.txt"
+    }
+  }
+}
