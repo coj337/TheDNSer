@@ -1,4 +1,5 @@
 ﻿using System.Diagnostics;
+using System.Linq;
 using System.Net;
 
 namespace DNS_Bruteforce;
@@ -11,7 +12,6 @@ internal class Program
     static readonly string rootDomain = "stratussecurity.com";
     static readonly int maxConcurrency = 65535;
     static readonly Stopwatch timer = new();
-    static readonly TimeSpan queryTimeout = TimeSpan.FromSeconds(1);
 
     static async Task Main()
     {
@@ -33,51 +33,15 @@ internal class Program
         cancelToken = userExitSource.Token;
 
         timer.Start();
-
-        // Start background tasks to send, receive and process the data
-        var tasks = new List<Task>
-        {
-            lookup.StartReceivedProcessorAsync(cancelToken),
-            lookup.StartSendProcessorAsync(cancelToken),
-            lookup.StartSendQueuerAsync(cancelToken),
-            PrintStats()
-        };
-
-        var receiveThread = new Thread(() => lookup.ProcessReceiveQueueAsync(cancelToken))
-        {
-            IsBackground = true
-        };
-        receiveThread.Start();
-        
-        try
-        {
-            await Task.WhenAll(tasks);
-        }
-        catch (OperationCanceledException)
-        {
-            // This is planned, we're done :D
-        }
+        var validSubs = await lookup.BruteForce(cancelToken, true);
         timer.Stop();
 
         Console.WriteLine();
-        foreach (var subdomain in lookup.validSubdomains.Order())
+        foreach (var subdomain in validSubs.Order())
         {
             Console.WriteLine($"Found: {subdomain}");
         }
         Console.WriteLine($"Took {timer.Elapsed.TotalSeconds} seconds");
-    }
-
-    private static async Task PrintStats()
-    {
-        while (!cancelToken.IsCancellationRequested && !(lookup?.IsFinished() ?? false))
-        {
-            await Task.Delay(1000);
-            if (lookup != null)
-            {
-                var printOut = $"\rS_Pending {lookup.GetSendQueueSize()} | R_Pending {lookup.GetRetrieveQueueSize()} | S {lookup.sentCount} | R {lookup.AllCount} | Err: {lookup.ErrorCount} | Refuse {lookup.RefusedCount} | ServFail {lookup.ServFailCount} | Timeout {lookup.TimeoutCount} | Not Imp {lookup.NotImpCount} | Not Exist {lookup.NotExistCount} | Exist {lookup.ExistCount} | Total {lookup.processedCount}/{subdomains?.Length ?? 0}";
-                Console.Write(printOut + "  ");
-            }
-        }
     }
 
     private static CancellationTokenSource GetUserConsoleCancellationSource()

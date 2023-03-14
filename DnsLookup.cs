@@ -1,5 +1,6 @@
 ﻿using System.Buffers.Binary;
 using System.Collections.Concurrent;
+using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -57,6 +58,39 @@ public class DnsLookup
         _dnsServers = dnsServers;
         _sendEndpoint = new IPEndPoint(dnsServers[0], DNS_PORT);
         udpSocket = new(SocketType.Dgram, ProtocolType.Udp);
+    }
+
+    public async Task<string[]> BruteForce(CancellationToken cancelToken = default, bool printStats = false)
+    {
+        // Start background tasks to send, receive and process the data
+        var tasks = new List<Task>
+        {
+            StartReceivedProcessorAsync(cancelToken),
+            StartSendProcessorAsync(cancelToken),
+            StartSendQueuerAsync(cancelToken),
+        };
+        if (printStats)
+        {
+            tasks.Add(PrintStats(cancelToken));
+        }
+
+        // The receive task gets an explicit thread to ensure lowest drop rate
+        var receiveThread = new Thread(async () => await ProcessReceiveQueueAsync(cancelToken))
+        {
+            IsBackground = true
+        };
+        receiveThread.Start();
+
+        try
+        {
+            await Task.WhenAll(tasks);
+        }
+        catch (OperationCanceledException)
+        {
+            // This is planned, we're done :D
+        }
+
+        return validSubdomains.ToArray();
     }
 
     public async Task StartSendQueuerAsync(CancellationToken cancelToken)
@@ -449,6 +483,17 @@ public class DnsLookup
             Interlocked.Increment(ref AllCount);
         }
     }
+
+    private async Task PrintStats(CancellationToken cancelToken)
+    {
+        while (!cancelToken.IsCancellationRequested && !IsFinished())
+        {
+            await Task.Delay(1000, cancelToken);
+            var printOut = $"\rS_Pending {GetSendQueueSize()} | R_Pending {GetRetrieveQueueSize()} | S {sentCount} | R {AllCount} | Err: {ErrorCount} | Refuse {RefusedCount} | ServFail {ServFailCount} | Timeout {TimeoutCount} | Not Imp {NotImpCount} | Not Exist {NotExistCount} | Exist {ExistCount} | Total {processedCount}/{_subdomains?.Length ?? 0}";
+            Console.Write(printOut + "  ");
+        }
+    }
+
 }
 
 public struct QueryInfo
