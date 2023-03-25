@@ -2,7 +2,7 @@
   "profiles": {
     "TheDNSer": {
       "commandName": "Project",
-      "commandLineArgs": "stratussecurity.com subdomains.txt dns_resolvers.txt"
+      "commandLineArgs": "stratussecurity.com subdomains.txt dns_resolvers.txt trusted_resolvers.txt"
     }
   }
 }

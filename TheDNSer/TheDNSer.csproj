@@ -26,7 +26,6 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\DNS Bruteforcer\DNS_Bruteforcer.csproj" />
     <ProjectReference Include="..\DNS_Bruteforcer\DNS_Bruteforcer.csproj" />
   </ItemGroup>
 
@@ -35,6 +34,9 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
     <None Update="subdomains.txt">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Update="trusted_resolvers.txt">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
   </ItemGroup>

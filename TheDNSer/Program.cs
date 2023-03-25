@@ -5,8 +5,9 @@ namespace TheDNSer;
 
 internal class Program
 {
-    static readonly string rootDomain = "stratussecurity.com";
     static readonly Stopwatch timer = new();
+    static bool validateDomains = true;
+    static bool filterWildcards = false;
 
     static async Task Main(string[] args)
     {
@@ -34,6 +35,12 @@ internal class Program
             return;
         }
 
+        if (validateDomains && !File.Exists(args[3]))
+        {
+            Console.WriteLine("Trusted resolvers file does not exist.");
+            return;
+        }
+
         // Get all the data
         var subdomains = File.ReadAllLines(args[1]).Select(s => $"{s}.{args[0]}").ToArray();
         var resolvers = File.ReadAllLines(args[2]).ToArray();
@@ -41,7 +48,16 @@ internal class Program
         // Construct and run
         timer.Start();
         var lookup = new DnsLookup(resolvers, subdomains);
+        Console.WriteLine("Brute forcing initial subdomains...");
         var validSubs = await lookup.BruteForce(true);
+        Console.WriteLine($" - {timer.Elapsed.TotalSeconds} seconds");
+        if (validateDomains)
+        {
+            Console.WriteLine($"Validating {validSubs.Length} subdomains...");
+            var trustedResolvers = File.ReadAllLines(args[3]).ToArray();
+            lookup = new DnsLookup(trustedResolvers, validSubs);
+            validSubs = await lookup.BruteForce(true);
+        }
         timer.Stop();
 
         // Write some final stats

@@ -50,7 +50,7 @@ public class DnsLookup
         {
             resolverEndpoints[i] = IPAddress.Parse(dnsServers[i]);
         }
-
+        
         // Set up all the things
         _subdomains = subdomains;
         _completedDomains = new HashSet<string>(subdomains.Length);
@@ -68,7 +68,7 @@ public class DnsLookup
         udpSocket = new(SocketType.Dgram, ProtocolType.Udp);
     }
 
-    public async Task<string[]> BruteForce(bool printStats = false, CancellationToken cancelToken = default)
+    public async Task<string[]> BruteForce(bool printSimpleStats = false, bool printAdvancedStats = false, CancellationToken cancelToken = default)
     {
         // Start background tasks to send, receive and process the data
         var tasks = new List<Task>
@@ -77,9 +77,13 @@ public class DnsLookup
             StartSendProcessorAsync(cancelToken),
             StartSendQueuerAsync(cancelToken),
         };
-        if (printStats)
+        if (printSimpleStats)
         {
-            tasks.Add(PrintStats(cancelToken));
+            tasks.Add(PrintSimpleStats(cancelToken));
+        }
+        else if (printAdvancedStats)
+        {
+            tasks.Add(PrintAdvancedStats(cancelToken));
         }
 
         // The receive task gets an explicit thread to ensure lowest drop rate
@@ -466,9 +470,9 @@ public class DnsLookup
                     break;
                 case DnsResult.REFUSED:
                     Interlocked.Increment(ref RefusedCount);
-                    Interlocked.Increment(ref processedCount);
-                    _completedDomains.Add(_queryInfos[id].Hostname);
-                    _queryInfos[id].State = QueryState.NotStarted;
+                    //Interlocked.Increment(ref processedCount);
+                    //_completedDomains.Add(_queryInfos[id].Hostname);
+                    //_queryInfos[id].State = QueryState.NotStarted;
                     break;
                 case DnsResult.ERROR:
                     Interlocked.Increment(ref ErrorCount);
@@ -492,7 +496,17 @@ public class DnsLookup
         }
     }
 
-    private async Task PrintStats(CancellationToken cancelToken)
+    private async Task PrintSimpleStats(CancellationToken cancelToken)
+    {
+        while (!cancelToken.IsCancellationRequested && !IsFinished())
+        {
+            await Task.Delay(1000, cancelToken);
+            var printOut = $"\r{processedCount}/{_subdomains.Length} ({(double)processedCount / _subdomains.Length * 100:N2}% Complete)";
+            Console.Write(printOut + "  ");
+        }
+    }
+
+    private async Task PrintAdvancedStats(CancellationToken cancelToken)
     {
         while (!cancelToken.IsCancellationRequested && !IsFinished())
         {
@@ -501,7 +515,6 @@ public class DnsLookup
             Console.Write(printOut + "  ");
         }
     }
-
 }
 
 public struct QueryInfo
